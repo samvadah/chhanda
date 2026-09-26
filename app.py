@@ -1,3 +1,11 @@
+import ast
+# Compatibility patch for Python 3.12+ / 3.14 with Aksharamukha
+if not hasattr(ast, 'Str'):
+    ast.Str = ast.Constant
+    ast.Num = ast.Constant
+    ast.Bytes = ast.Constant
+    ast.NameConstant = ast.Constant
+
 import os
 import re
 import inspect
@@ -6,11 +14,23 @@ import streamlit as st
 import chanda
 
 try:
+    from aksharamukha import transliterate
+    HAS_AKSHARAMUKHA = True
+except ImportError:
+    HAS_AKSHARAMUKHA = False
+
+try:
     import settings
 except ImportError:
     settings = None
 
 st.set_page_config(page_title="Chandojnanam", layout="wide")
+
+AKSHARAMUKHA_SCHEMES = [
+    "Devanagari", "IAST", "ISO", "Harvard-Kyoto", "SLP1", "ITRANS", "Velthuis", "WX",
+    "Bengali", "Gujarati", "Gurmukhi", "Kannada", "Malayalam", 
+    "Oriya", "Tamil", "Telugu", "Brahmi", "Grantha", "Sharada", "Siddham"
+]
 
 # Helper functions for Sanskrit mode (Strictly no English punctuation, only danda)
 def to_devanagari_numerals(text):
@@ -25,22 +45,41 @@ def clean_sanskrit_text(text):
         text = text.replace(char, " ")
     return " ".join(text.split())
 
-# Re-align syllables so conjunct codas attach to the preceding syllable (e.g. ल + म्ब्य -> लम्ब् + य)
-def realign_phonetic_syllables(syllables):
+# Re-align syllables:
+# 1. Pure halantas merge to preceding letter (व + म् -> वम्)
+# 2. Conjunct onsets transfer codas to preceding letter (ल + म्ब्य -> लम्ब् + य)
+def realign_phonetic_syllables(syllables, lg_list):
     if not syllables:
-        return []
+        return [], []
     syls = list(syllables)
-    conjunct_pattern = re.compile(r"^((?:[\u0915-\u0939\u0958-\u095F]\u094D)+)(.+)$")
+    lgs = list(lg_list)
     
+    # Step 1: Merge any purely halanta/consonant tokens (like trailing 'म्', 'न्', 'त्') into previous syllable
+    pure_coda_pattern = re.compile(r"^(?:[\u0915-\u0939\u0958-\u095F]\u094D)+$")
+    i = 1
+    while i < len(syls):
+        if pure_coda_pattern.match(syls[i]):
+            syls[i - 1] += syls[i]
+            syls.pop(i)
+            if i < len(lgs) and len(lgs) > len(syls):
+                lgs.pop(i)
+        else:
+            i += 1
+
+    # Step 2: Transfer conjunct onset codas to preceding syllable
+    conjunct_pattern = re.compile(r"^((?:[\u0915-\u0939\u0958-\u095F]\u094D)+)(.+)$")
     for i in range(1, len(syls)):
         m = conjunct_pattern.match(syls[i])
         if m:
-            coda = m.group(1)       # Coda consonant cluster with virama (e.g. 'म्ब्', 'र्', 'त्')
-            remainder = m.group(2)  # Remaining vowel-bearing part (e.g. 'य', 'म', 'स')
+            coda = m.group(1)       # e.g. 'म्ब्', 'र्', 'त्'
+            remainder = m.group(2)  # e.g. 'य', 'म', 'स'
             syls[i - 1] += coda
             syls[i] = remainder
             
-    return syls
+    if len(lgs) > len(syls):
+        lgs = lgs[:len(syls)]
+        
+    return syls, lgs
 
 # Unpack meter name from nested structures
 def extract_primary_meter(res_data):
@@ -54,7 +93,6 @@ def extract_primary_meter(res_data):
                 if isinstance(cand, str) and cand.strip():
                     return cand.strip()
 
-    # Fallback to line-level identification
     for l_entry in res_data.get("line", []):
         r = l_entry.get("result", {})
         disp_ch = r.get("display_chanda")
@@ -71,7 +109,29 @@ def extract_primary_meter(res_data):
             
     return None
 
-# 1. Determine data directory path
+# Transliteration helpers
+def convert_to_devanagari(text, input_script_choice):
+    if not text or not HAS_AKSHARAMUKHA:
+        return text
+    try:
+        if input_script_choice == "Auto-Detect":
+            detected = transliterate.auto_detect(text)
+            src_script = detected if detected else "IAST"
+        else:
+            src_script = input_script_choice
+        return transliterate.process(src_script, "Devanagari", text)
+    except Exception:
+        return text
+
+def convert_from_devanagari(text, target_script):
+    if not text or not HAS_AKSHARAMUKHA or target_script == "Devanagari":
+        return text
+    try:
+        return transliterate.process("Devanagari", target_script, str(text))
+    except Exception:
+        return text
+
+# Determine data directory path
 DATA_PATH = None
 if settings:
     for attr in ["DATA_PATH", "DATA_DIR", "CHANDA_DATA_DIR", "CHANDA_DATA"]:
@@ -82,7 +142,6 @@ if settings:
 if not DATA_PATH or not os.path.exists(DATA_PATH):
     DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
-# 2. Engine initialization
 @st.cache_resource
 def load_analyzer(path):
     return chanda.Chanda(path)
@@ -110,12 +169,26 @@ def run_identification(analyzer, text, fuzzy=True):
         return method(**kwargs)
     return method(text)
 
-# Language selection
+# Sidebar: Language & Script Selectors
 language = st.sidebar.radio(
     "Language / भाषा",
     options=["English", "संस्कृतम्"]
 )
 is_sa = (language == "संस्कृतम्")
+
+def format_script(s):
+    if is_sa:
+        if s == "Auto-Detect": return "स्वयम्"
+        if s == "Devanagari": return "देवनागरी"
+    return s
+
+st.sidebar.markdown("---")
+t_input_script = "निवेशलिपिः" if is_sa else "Input Script"
+t_output_script = "निर्गमलिपिः" if is_sa else "Output Script"
+
+input_options = ["Auto-Detect"] + AKSHARAMUKHA_SCHEMES
+input_script_sel = st.sidebar.selectbox(t_input_script, input_options, index=0, format_func=format_script)
+output_script_sel = st.sidebar.selectbox(t_output_script, AKSHARAMUKHA_SCHEMES, index=0, format_func=format_script)
 
 # Localization mapping
 if is_sa:
@@ -143,7 +216,7 @@ else:
     subtitle_text = "Sanskrit Prosody and Metrical Identification System"
     help_label = "Help"
     input_label = "Sanskrit Verse"
-    fuzzy_label = "Enable Approximate Matching"
+    fuzzy_label = "Fuzzy Matching"
     button_label = "Analyze Verse"
     empty_warning = "Please provide verse text for analysis."
     verse_meter_label = "Identified Meter"
@@ -181,17 +254,22 @@ if st.button(button_label, type="primary"):
         st.warning(empty_warning)
     else:
         try:
-            raw_output = run_identification(analyzer, verse_input.strip(), fuzzy=fuzzy_enabled)
+            # Transliterate input into Devanagari for the engine
+            devanagari_input = convert_to_devanagari(verse_input.strip(), input_script_sel)
+
+            raw_output = run_identification(analyzer, devanagari_input, fuzzy=fuzzy_enabled)
             res_data = raw_output.get("result", {}) if isinstance(raw_output, dict) else {}
 
             # 1. Primary Verse-level Meter Identification
             primary_meter = extract_primary_meter(res_data) or unknown_meter
 
+            # Render output script conversion if needed
+            disp_meter = convert_from_devanagari(primary_meter, output_script_sel)
             if is_sa:
-                clean_meter = clean_sanskrit_text(primary_meter)
+                clean_meter = clean_sanskrit_text(disp_meter)
                 st.markdown(f"### {verse_meter_label} । {clean_meter} ॥")
             else:
-                st.markdown(f"### {verse_meter_label}: **{primary_meter}**")
+                st.markdown(f"### {verse_meter_label}: **{disp_meter}**")
 
             # 2. Line-by-Line Summary Table
             lines_data = res_data.get("line", [])
@@ -207,23 +285,28 @@ if st.button(button_label, type="primary"):
                 matra_val = r.get("display_matra") or r.get("matra") or 0
                 gana_val = r.get("display_gana") or r.get("gana") or ""
 
+                line_out = convert_from_devanagari(line_str, output_script_sel)
+                chanda_out = convert_from_devanagari(chanda_val, output_script_sel)
+                jaati_out = convert_from_devanagari(jaati_val, output_script_sel)
+                gana_out = convert_from_devanagari(gana_val, output_script_sel)
+
                 if is_sa:
                     summary_rows.append({
-                        col_pada: clean_sanskrit_text(line_str),
-                        col_meter: clean_sanskrit_text(chanda_val),
-                        col_jaati: clean_sanskrit_text(jaati_val),
+                        col_pada: clean_sanskrit_text(line_out),
+                        col_meter: clean_sanskrit_text(chanda_out),
+                        col_jaati: clean_sanskrit_text(jaati_out),
                         col_syllables: clean_sanskrit_text(length_val),
                         col_matras: clean_sanskrit_text(matra_val),
-                        col_ganas: clean_sanskrit_text(gana_val)
+                        col_ganas: clean_sanskrit_text(gana_out)
                     })
                 else:
                     summary_rows.append({
-                        col_pada: line_str,
-                        col_meter: str(chanda_val),
-                        col_jaati: str(jaati_val),
+                        col_pada: line_out,
+                        col_meter: str(chanda_out),
+                        col_jaati: str(jaati_out),
                         col_syllables: length_val,
                         col_matras: matra_val,
-                        col_ganas: str(gana_val)
+                        col_ganas: str(gana_out)
                     })
 
             if summary_rows:
@@ -241,18 +324,21 @@ if st.button(button_label, type="primary"):
                 if not raw_syllables:
                     continue
 
-                # Re-align codas phonetically (e.g. ल + म्ब्य -> लम्ब् + य)
-                realigned_syllables = realign_phonetic_syllables(raw_syllables)
+                # Merge pure halantas (व + म् -> वम्) & conjunct onsets (ल + म्ब्य -> लम्ब् + य)
+                realigned_syllables, realigned_lg = realign_phonetic_syllables(raw_syllables, lg_list)
+
+                # Script conversion
+                line_disp = convert_from_devanagari(line_str, output_script_sel)
+                syllables_disp = [convert_from_devanagari(s, output_script_sel) for s in realigned_syllables]
+                lg_disp = [convert_from_devanagari(x, output_script_sel) for x in realigned_lg]
 
                 if is_sa:
-                    disp_line = clean_sanskrit_text(line_str)
+                    disp_line = clean_sanskrit_text(line_disp)
                     st.markdown(f"**{col_pada} {to_devanagari_numerals(idx + 1)} । {disp_line}**")
-                    syllables_disp = [clean_sanskrit_text(s) for s in realigned_syllables]
-                    lg_disp = [clean_sanskrit_text(x) for x in lg_list]
+                    syllables_disp = [clean_sanskrit_text(s) for s in syllables_disp]
+                    lg_disp = [clean_sanskrit_text(x) for x in lg_disp]
                 else:
-                    st.markdown(f"**Line {idx + 1}: {line_str}**")
-                    syllables_disp = realigned_syllables
-                    lg_disp = lg_list
+                    st.markdown(f"**Line {idx + 1}: {line_disp}**")
 
                 # HTML grid display
                 table_html = """
@@ -281,10 +367,10 @@ if st.button(button_label, type="primary"):
             else:
                 st.error(f"Analysis error: {e}")
 
-# Footer, Tool Links, and Issue Reporting Section
+# Footers with collapsible expanders (matching Sakhaa architecture)
 st.write("")
 st.write("")
-st.divider()
+st.markdown("---")
 
 if is_sa:
     t_links_title = "🔗 अन्यानि तन्त्रांशाणि"
@@ -300,39 +386,41 @@ if is_sa:
         "<strong>दोषावलोकनम्।</strong> यत्र कुत्रापि दोषाः दृश्यन्ते सद्य एव विद्युत्पत्रेण गिड्ढब्जालस्थले वा सूच्यताम्<br><br>"
         "<div style='text-align: center; margin-top: 15px;'>"
         "<a href='mailto:samvadah@proton.me' style='text-decoration: none; padding: 5px 10px; background-color: #f0f2f6; border-radius: 5px; color: black; margin-right: 10px;'>विद्युत्पत्रम्</a>"
-        "<a href='https://github.com/samvadah/chhana/issues' target='_blank' style='text-decoration: none; padding: 5px 10px; background-color: #f0f2f6; border-radius: 5px; color: black;'>गिड्ढब्जालस्थलम्</a>"
+        "<a href='https://github.com/samvadah/chhanda/issues' target='_blank' style='text-decoration: none; padding: 5px 10px; background-color: #f0f2f6; border-radius: 5px; color: black;'>गिड्ढब्जालस्थलम्</a>"
         "</div>"
     )
     t_footer = '<div style="text-align: center; font-size: 0.9rem; color: #6b7280; margin-top: 2.5rem;">भारतदेशे श्रद्धया रचितं <a href="https://linktr.ee/samvadah" target="_blank" rel="noopener" style="color: #6b7280; text-decoration: underline;">संस्कृतसंवादेन</a>।</div>'
 
-    st.markdown(f"### {t_links_title}")
-    st.markdown(t_links)
-    st.markdown("---")
-    st.markdown(f"### {t_report_title}")
-    st.markdown(t_report_body, unsafe_allow_html=True)
+    with st.expander(t_links_title, expanded=False):
+        st.markdown(t_links)
+
+    with st.expander(t_report_title, expanded=False):
+        st.markdown(f"<div style='color: gray; font-size: 0.9em;'>{t_report_body}</div>", unsafe_allow_html=True)
+
     st.markdown(t_footer, unsafe_allow_html=True)
 else:
-    t_links_title_en = "Related Tools"
+    t_links_title_en = "🔗 Related Tools"
     t_links_en = """
-* [**Sankhya**](https://sankhya.streamlit.app) Sanskrit Numeral Converter
-* [**Sandhirat**](https://sandhify.streamlit.app) Sanskrit Sandhi Joiner
-* [**Sanskrit News**](https://sanskritnews.streamlit.app) Sanskrit News Generator
-* [**Sakhaa**](https://sakhaa.streamlit.app) Sanskrit Morphological Analyzer
-* [**Sanskrit Websites Directory**](https://anotepad.com/note/read/qx4598pk)
+* 🧮 [**Sankhya**](https://sankhya.streamlit.app) - Sanskrit Numeral Converter
+* 🧩 [**Sandhify**](https://sandhify.streamlit.app) - Sanskrit Sandhi Joiner
+* 📰 [**Sanskrit News**](https://sanskritnews.streamlit.app) - Sanskrit News Generator
+* 🐻‍❄️ [**Sakhaa**](https://sakhaa.streamlit.app) - Sanskrit Morphological Analyzer
+* 📚 [**Annotated List of Sanskrit Websites**](https://anotepad.com/note/read/qx4598pk)
 """
-    t_report_title_en = "Issue Reporting"
+    t_report_title_en = "Report Mistakes"
     t_report_body_en = (
-        "<strong>Issue Reporting:</strong> If you find any issues, please report them via email or on GitHub.<br><br>"
+        "<strong>Mistakes / Errors:</strong> If you spot any incorrect identifications or prosodic analyses, please report them immediately via email or GitHub.<br><br>"
         "<div style='text-align: center; margin-top: 15px;'>"
-        "<a href='mailto:samvadah@proton.me' style='text-decoration: none; padding: 5px 10px; background-color: #f0f2f6; border-radius: 5px; color: black; margin-right: 10px;'>Email</a>"
-        "<a href='https://github.com/samvadah/chhanda/issues' target='_blank' style='text-decoration: none; padding: 5px 10px; background-color: #f0f2f6; border-radius: 5px; color: black;'>GitHub Issues</a>"
+        "<a href='mailto:samvadah@proton.me' style='text-decoration: none; padding: 5px 10px; background-color: #f0f2f6; border-radius: 5px; color: black; margin-right: 10px;'>Report via Email</a>"
+        "<a href='https://github.com/samvadah/chhanda/issues' target='_blank' style='text-decoration: none; padding: 5px 10px; background-color: #f0f2f6; border-radius: 5px; color: black;'>Open GitHub Issue</a>"
         "</div>"
     )
     t_footer_en = '<div style="text-align: center; font-size: 0.9rem; color: #6b7280; margin-top: 2.5rem;">Crafted with devotion in India by <a href="https://linktr.ee/samvadah" target="_blank" rel="noopener" style="color: #6b7280; text-decoration: underline;">Sanskrit Samvadah</a>.</div>'
 
-    st.markdown(f"### {t_links_title_en}")
-    st.markdown(t_links_en)
-    st.markdown("---")
-    st.markdown(f"### {t_report_title_en}")
-    st.markdown(t_report_body_en, unsafe_allow_html=True)
+    with st.expander(t_links_title_en, expanded=False):
+        st.markdown(t_links_en)
+
+    with st.expander(t_report_title_en, expanded=False):
+        st.markdown(f"<div style='color: gray; font-size: 0.9em;'>{t_report_body_en}</div>", unsafe_allow_html=True)
+
     st.markdown(t_footer_en, unsafe_allow_html=True)
