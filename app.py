@@ -24,7 +24,7 @@ try:
 except ImportError:
     settings = None
 
-st.set_page_config(page_title="Chandojnanam", layout="wide")
+st.set_page_config(page_title="Chhandojnanam", layout="wide")
 
 AKSHARAMUKHA_SCHEMES = [
     "Devanagari", "IAST", "ISO", "Harvard-Kyoto", "SLP1", "ITRANS", "Velthuis", "WX",
