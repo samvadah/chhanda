@@ -377,8 +377,7 @@ if is_sa:
     t_links = """
 * 🧮 [**सङ्ख्या**](https://sankhya.streamlit.app) संस्कृतसङ्ख्यापरिवर्तकः
 * 🧩 [**सन्धीराट्**](https://sandhify.streamlit.app) सन्धियोजकः
-* 📰 [**संस्कृतवार्ताः**](https://sanskritnews.streamlit.app) संस्कृतवार्ताजनित्रम्
-* [**सखा**](https://sakhaa.streamlit.app) संस्कृतपदपरिचयकृत्
+* 🐻‍❄️ [**सखा**](https://sakhaa.streamlit.app) संस्कृतपदपरिचयकृत्
 * 📚 [**संस्कृतजालस्थानानां सूचिः**](https://anotepad.com/note/read/qx4598pk)
 """
     t_report_title = "दोषावलोकनम्"
@@ -403,7 +402,6 @@ else:
     t_links_en = """
 * 🧮 [**Sankhya**](https://sankhya.streamlit.app) - Sanskrit Numeral Converter
 * 🧩 [**Sandhify**](https://sandhify.streamlit.app) - Sanskrit Sandhi Joiner
-* 📰 [**Sanskrit News**](https://sanskritnews.streamlit.app) - Sanskrit News Generator
 * 🐻‍❄️ [**Sakhaa**](https://sakhaa.streamlit.app) - Sanskrit Morphological Analyzer
 * 📚 [**Annotated List of Sanskrit Websites**](https://anotepad.com/note/read/qx4598pk)
 """
